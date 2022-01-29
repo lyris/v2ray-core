@@ -1,44 +1,108 @@
-<div>
-  <img width="190" height="210" align="left" src="https://raw.githubusercontent.com/v2fly/v2fly-github-io/master/docs/.vuepress/public/readme-logo.png" alt="V2Ray"/>
-  <br>
-  <h1>Project V</h1>
-  <p>Project V is a set of network tools that helps you to build your own computer network. It secures your network connections and thus protects your privacy.</p>
-</div>
+## 主要改进
 
-[![GitHub Test Badge](https://github.com/v2fly/v2ray-core/workflows/Test/badge.svg)](https://github.com/v2fly/v2ray-core/actions)
-[![codecov.io](https://codecov.io/gh/v2fly/v2ray-core/branch/master/graph/badge.svg?branch=master)](https://codecov.io/gh/v2fly/v2ray-core?branch=master)
-[![codebeat](https://goreportcard.com/badge/github.com/v2fly/v2ray-core)](https://goreportcard.com/report/github.com/v2fly/v2ray-core)
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/e150b7ede2114388921943bf23d95161)](https://www.codacy.com/gh/v2fly/v2ray-core/dashboard?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=v2fly/v2ray-core&amp;utm_campaign=Badge_Grade)
-[![Downloads](https://img.shields.io/github/downloads/v2fly/v2ray-core/total.svg)](https://github.com/v2fly/v2ray-core/releases/latest)
+增加了一种针对plain http1.1的转发方式，而不是通过CONNECT代理亲求使用HTTP代理服务器，使之能通过有端口限制的http服务器。
 
-## Related Links
+在分布式系统中，一些服务程序运行时的提供的简易的web dashboard供开发人员内部查看，其端口是往往随机的[1-65535]（一台机器上会部署大量服务），并不一定是80和443，更不可能是固定端口。
 
-- [Documentation](https://www.v2fly.org) and [Newcomer's Instructions](https://www.v2fly.org/guide/start.html)
-- Welcome to translate V2Ray documents via [Transifex](https://www.transifex.com/v2fly/public/)
+为了保密起见，这些运行时的web仪表盘往往需要通过跳板HTTP代理服务器才能访问或加速。
 
-## Packaging Status
+如果直接走V2ray的http代理，因为内部实现是走的正统CONNECT代理请求，会被跳板的HTTP代理服务器block掉。
 
-> If you are willing to package V2Ray for other distros/platforms, please let us know or seek for help via [GitHub issues](https://github.com/v2fly/v2ray-core/issues).
+虽然在Firefox上可以通过Foxyproxy(Chrome上的SwithyOmega同理)，定义一条白名单规则（通常是第一条）如让这些内部www服务强制走代理，剩下的走v2ray来变相满足需求:
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/v2ray.svg)](https://repology.org/project/v2ray/versions)
+```foxyproxy
+   ^(?:[^:@/]+(?::[^@/]+)?@)?(?:192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6789]|2[0-9]|3[01])\.\d+\.\d+)(?::\d+)?(?:/.*)?$
+```
 
-## License
+应用本补丁后可以直接通过v2ray来使用http代理服务器了，一个v2ray搞定一切。
 
-[The MIT License (MIT)](https://raw.githubusercontent.com/v2fly/v2ray-core/master/LICENSE)
+这应该属于小众需求，相关进一步的背景可以查看如下[issue](https://github.com/v2fly/v2ray-core/issues/1306)
 
-## Credits
+## 配置
 
-This repo relies on the following third-party projects:
 
-- In production:
-  - [gorilla/websocket](https://github.com/gorilla/websocket)
-  - [lucas-clemente/quic-go](https://github.com/lucas-clemente/quic-go)
-  - [pires/go-proxyproto](https://github.com/pires/go-proxyproto)
-  - [seiflotfy/cuckoofilter](https://github.com/seiflotfy/cuckoofilter)
-  - [google/starlark-go](https://github.com/google/starlark-go)
-  - [jhump/protoreflect](https://github.com/jhump/protoreflect)
-  - [inetaf/netaddr](https://github.com/inetaf/netaddr)
+在outbound protocol为"http"的settings部分增加plainHttp(true|false)选项。
 
-- For testing only:
-  - [miekg/dns](https://github.com/miekg/dns)
-  - [h12w/socks](https://github.com/h12w/socks)
+## 举例
+当plainHttp设置为true时，
+浏览器只需要使用socket代理(127.0.0.1:1080),就可以通过http代理服务器192.168.100.22:3128访问如 http://10.200.2.238:41115/xxx/monitor/flight/index.do 这样的服务了：
+<!-- 此处 yaml 仅用作语法高亮，实际内容为 json -->
+```yaml
+    {
+    "log": {
+        "loglevel": "info"
+    },
+    "inbounds": [
+        {
+            "port": 1080,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            },
+            "settings": {
+                "auth": "noauth",
+                "udp": true,
+                "ip": "127.0.0.1"
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "http",
+            "tag": "proxy-test",
+            "settings": {
+                "servers": [
+                    {
+                        "address": "192.168.100.22",
+                        "port": 3128,
+                        "users": [
+                            {
+                              "user": "my-username",
+                              "pass": "my-password"
+                            }
+                          ]
+                    }
+                ],
+                "plainHttp": true  // newly introduced config
+            }
+        },
+        {
+            "protocol": "freedom",
+            "tag": "direct",
+            "settings": {
+                "domainStrategy": "UseIP"
+            }
+        }
+    ],
+    "routing": {
+        "domainStrategy": "IPOnDemand",
+        "rules": [
+            {
+                "type": "field",
+                "ip": [
+                  "10.0.0.0/8"
+                ],
+                "network": "tcp",
+                "outboundTag": "proxy-test"
+            }, 
+            {
+                "type": "field",
+                "outboundTag": "direct",
+                "network": "udp,tcp"
+            }
+        ]
+    }
+}
+```
+
+## 注意
+只针对目标网页http1.1有效，对http2不适用，对加密web服务https也不适用，仍然走CONNECT方式。
+
+## 最后
+
+祝你玩的愉快！
