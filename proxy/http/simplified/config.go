@@ -26,6 +26,7 @@ func init() {
 				},
 			},
 			H1SkipWaitForReply: simplifiedClient.H1SkipWaitForReply,
+			PlainHttp:          simplifiedClient.PlainHttp,
 		}
 		return common.CreateObject(ctx, fullClient)
 	}))

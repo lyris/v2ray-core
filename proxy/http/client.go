@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"io"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,7 @@ type Client struct {
 	serverPicker       protocol.ServerPicker
 	policyManager      policy.Manager
 	h1SkipWaitForReply bool
+	plainHttp          bool
 }
 
 type h2Conn struct {
@@ -65,6 +68,7 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Client, error) {
 		serverPicker:       protocol.NewRoundRobinServerPicker(serverList),
 		policyManager:      v.GetFeature(policy.ManagerType()).(policy.Manager),
 		h1SkipWaitForReply: config.H1SkipWaitForReply,
+		plainHttp:          config.PlainHttp,
 	}, nil
 }
 
@@ -107,32 +111,45 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			defer bytespool.Free(firstPayload)
 		}
 	}
-
+	// var usePlainHttp = false
+	// if c.plainHttp {
+	// 	_, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(firstPayload)))
+	// 	if err == nil {
+	// 		usePlainHttp = true
+	// 	}
+	// }
 	if err := retry.ExponentialBackoff(5, 100).On(func() error {
 		server := c.serverPicker.PickServer()
 		dest := server.Destination()
 		user = server.PickUser()
-
-		netConn, firstResp, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, firstPayload, c.h1SkipWaitForReply)
-		if netConn != nil {
-			if _, ok := netConn.(*http2Conn); !ok && !c.h1SkipWaitForReply {
-				if _, err := netConn.Write(firstPayload); err != nil {
-					netConn.Close()
-					return err
+		if !c.plainHttp {
+			netConn, firstResp, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, firstPayload, c.h1SkipWaitForReply)
+			if netConn != nil {
+				if _, ok := netConn.(*http2Conn); !ok && !c.h1SkipWaitForReply {
+					if _, err := netConn.Write(firstPayload); err != nil {
+						netConn.Close()
+						return err
+					}
 				}
-			}
-			if firstResp != nil {
-				if err := link.Writer.WriteMultiBuffer(firstResp); err != nil {
-					return err
+				if firstResp != nil {
+					if err := link.Writer.WriteMultiBuffer(firstResp); err != nil {
+						return err
+					}
 				}
+				conn = internet.Connection(netConn)
 			}
-			conn = internet.Connection(netConn)
+			return err
+		} else {
+			rawConn, err := dialer.Dial(ctx, dest)
+			if err != nil {
+				return err
+			}
+			conn = rawConn
+			return nil
 		}
-		return err
 	}); err != nil {
 		return newError("failed to find an available destination").Base(err)
 	}
-
 	defer func() {
 		if err := conn.Close(); err != nil {
 			newError("failed to closed connection").Base(err).WriteToLog(session.ExportIDToError(ctx))
@@ -149,7 +166,15 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 
 	requestFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
-		return buf.Copy(link.Reader, buf.NewWriter(conn), buf.UpdateActivity(timer))
+		if !c.plainHttp {
+			return buf.Copy(link.Reader, buf.NewWriter(conn), buf.UpdateActivity(timer))
+		} else {
+			writer := buf.NewWriter(conn)
+			if err := plainForward(user, firstPayload, writer); err != nil {
+				return newError("failed to forward plain http request").Base(err)
+			}
+			return nil
+		}
 	}
 	responseFunc := func() error {
 		defer timer.SetTimeout(p.Timeouts.UplinkOnly)
@@ -357,4 +382,30 @@ func init() {
 	common.Must(common.RegisterConfig((*ClientConfig)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		return NewClient(ctx, config.(*ClientConfig))
 	}))
+}
+
+func plainForward(user *protocol.MemoryUser, firstPayload []byte, writer buf.Writer) error {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(firstPayload)))
+	if err != nil {
+		return newError("failed to read plain http request").Base(err)
+	}
+	if user != nil && user.Account != nil {
+		account := user.Account.(*Account)
+		auth := account.GetUsername() + ":" + account.GetPassword()
+		req.Header.Add("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
+		req.Header.Add("Proxy-Connection", "Keep-Alive")
+	}
+	reqBytes, err := httputil.DumpRequest(req, true)
+	if err != nil {
+		return newError("failed to dump requests").Base(err)
+	}
+	reqStr := strings.Replace(string(reqBytes), "/", "http://"+req.Host+"/", 1)
+	mBuffer, err := buf.ReadFrom(strings.NewReader(reqStr))
+	if err != nil {
+		return newError("failed to read hosts").Base(err)
+	}
+	if wErr := writer.WriteMultiBuffer(mBuffer); wErr != nil {
+		return newError("failed to write buffer").Base(err)
+	}
+	return nil
 }

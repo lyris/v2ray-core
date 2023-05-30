@@ -54,7 +54,8 @@ type HTTPRemoteConfig struct {
 }
 
 type HTTPClientConfig struct {
-	Servers []*HTTPRemoteConfig `json:"servers"`
+	Servers   []*HTTPRemoteConfig `json:"servers"`
+	PlainHttp bool                `json:"plainHttp"`
 }
 
 func (v *HTTPClientConfig) Build() (proto.Message, error) {
@@ -79,5 +80,6 @@ func (v *HTTPClientConfig) Build() (proto.Message, error) {
 		}
 		config.Server[idx] = server
 	}
+	config.PlainHttp = v.PlainHttp
 	return config, nil
 }
