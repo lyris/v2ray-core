@@ -63,10 +63,10 @@
                         "users": [
                             {
                               "user": "my-username",
-                              "pass": "my-password",
-                              "plainHttp": true  // newly introduced config
+                              "pass": "my-password"                              
                             }
-                          ]
+                          ],
+                         "plainHttp": true  // newly introduced config 
                     }
                 ],
                 // or put it here "plainHttp": true
